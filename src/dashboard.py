@@ -258,7 +258,13 @@ def make_news_panel(events: list, is_blackout: bool) -> Panel:
             delta   = ev['dt'] - now
             secs    = delta.total_seconds()
             if secs < -NEWS_BUFFER_MINUTES * 60:
-                status = "[dim]PASSED[/dim]"
+                past_secs = abs(secs)
+                hrs, rem = divmod(int(past_secs), 3600)
+                mins = rem // 60
+                if hrs > 0:
+                    status = f"[dim]{hrs}h {mins}m ago[/dim]"
+                else:
+                    status = f"[dim]{mins}m ago[/dim]"
                 label  = f"[dim]{ev['title']}[/dim]"
             elif abs(secs) <= NEWS_BUFFER_MINUTES * 60:
                 status = "[b white on red] LIVE [/b white on red]"
