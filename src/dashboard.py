@@ -35,8 +35,10 @@ from textual.containers import Grid, Vertical, Horizontal
 # ─────────────────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from live_inference import train_production_model, LIVE_NAS100_PATH, LIVE_GOLD_PATH, PROB_HIGH, PROB_LOW
 from feature_engineering import load_mt5_csv, build_features
+from news_fetcher import get_forexfactory_calendar, check_news_blackout
+from live_inference import train_production_model, LIVE_NAS100_PATH, LIVE_GOLD_PATH, PROB_HIGH, PROB_LOW
+from decision_logger import init_db, log_decision
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -44,46 +46,6 @@ from feature_engineering import load_mt5_csv, build_features
 NEWS_BUFFER_MINUTES   = 2
 PROB_HISTORY_LEN      = 60      # last N ticks to keep for sparkline
 LOG_MAX_LINES         = 200
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MACRO NEWS ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
-def fetch_high_impact_news():
-    """Fetches today's high-impact USD news from ForexFactory."""
-    try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
-        response = requests.get(url, timeout=10)
-        root = ET.fromstring(response.content)
-        events, today_str = [], datetime.now().strftime("%m-%d-%Y")
-        for event in root.findall('event'):
-            country = event.find('country').text
-            impact  = event.find('impact').text
-            d_str   = event.find('date').text
-            t_str   = event.find('time').text
-            title   = event.find('title').text
-            if country == "USD" and impact == "High" and d_str == today_str:
-                try:
-                    # Parse ForexFactory time (which is US Eastern Time)
-                    naive_dt = datetime.strptime(f"{d_str} {t_str}", "%m-%d-%Y %I:%M%p")
-                    eastern_dt = naive_dt.replace(tzinfo=ZoneInfo("America/New_York"))
-                    
-                    # Convert to system's local timezone, then make it naive for compatibility
-                    local_dt = eastern_dt.astimezone()
-                    local_naive = local_dt.replace(tzinfo=None)
-                    
-                    events.append({"title": title, "dt": local_naive})
-                except Exception:
-                    pass
-        return events
-    except Exception:
-        return []
-
-def check_news_blackout(events):
-    now = datetime.now()
-    for ev in events:
-        if ev['dt'] - timedelta(minutes=NEWS_BUFFER_MINUTES) <= now <= ev['dt'] + timedelta(minutes=NEWS_BUFFER_MINUTES):
-            return True, ev['title']
-    return False, None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RENDERERS & ALGORITHMS
@@ -390,6 +352,10 @@ class DashboardApp(App):
         ("q", "quit",        "Quit"),
         ("t", "toggle_dark", "Theme"),
         ("r", "reload_news", "Refresh News"),
+        ("w", "log_long",    "Log Long"),
+        ("s", "log_short",   "Log Short"),
+        ("a", "log_skip",    "Log Skip"),
+        ("d", "log_exit",    "Log Exit"),
     ]
 
     # ── Internal State ──────────────────────────────────────────────────────
@@ -411,6 +377,11 @@ class DashboardApp(App):
         self.current_regimes = {"NAS100": None, "GOLD": None}
         self.regime_start_times = {"NAS100": None, "GOLD": None}
         self.regime_is_buffer_limit = {"NAS100": False, "GOLD": False}
+        
+        # Telemetry Snapshots for Discretionary Logger
+        self.latest_snapshots = {"NAS100": None, "GOLD": None}
+        self.open_trade_uids = {"NAS100": None, "GOLD": None}
+        self.macro_confluence_str = "BOOTING"
 
     # ── Layout ──────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -445,9 +416,12 @@ class DashboardApp(App):
     async def on_mount(self) -> None:
         self._log("Dashboard initialised.")
         self._log("Fetching ForexFactory macro calendar…")
-        self.news_events = fetch_high_impact_news()
+        self.news_events = get_forexfactory_calendar()
         n = len(self.news_events)
         self._log(f"Calendar loaded — {n} high-impact USD event(s) today.")
+
+        self._log("Initializing Discretionary Decision Log DB…")
+        await asyncio.to_thread(init_db)
 
         self._log("Training LightGBM production models on historical data…")
         self.notify("⚙  Warming up AI Cores…", timeout=5)
@@ -506,6 +480,8 @@ class DashboardApp(App):
             else:
                 confluence = f"[b bright_yellow]DIVERGENT MACRO STATES (NAS100: {nas_reg}  |  GOLD: {gold_reg})[/b bright_yellow]"
                 color = "yellow"
+                
+            self.macro_confluence_str = Text.from_markup(confluence).plain
             
             panel = Panel(Text.from_markup(confluence, justify="center"), title=" ◈  MACRO CONFLUENCE ", border_style=color)
             self.query_one("#macro_confluence", Static).update(panel)
@@ -641,6 +617,18 @@ class DashboardApp(App):
                     f"GK-ratio={gk_ratio:.2f}x  "
                     f"BLACKOUT={'YES' if is_blackout else 'NO'}"
                 )
+            
+            # Update snapshot for discretionary logger
+            self.latest_snapshots[asset] = {
+                "prob_high": prob_high,
+                "regime_state": self.current_regimes[asset],
+                "state_time_seconds": int(time_in_regime.total_seconds()),
+                "gk_current": gk_current,
+                "gk_ratio": gk_ratio,
+                "top_drivers": top_drivers_list,
+                "macro_confluence": self.macro_confluence_str,
+                "is_news_blackout": is_blackout
+            }
 
         except Exception as exc:
             err = Panel(
@@ -652,10 +640,46 @@ class DashboardApp(App):
 
     # ── Actions ──────────────────────────────────────────────────────────────
     async def action_reload_news(self) -> None:
-        self._log("Manual news refresh triggered…")
-        self.news_events = fetch_high_impact_news()
-        self._log(f"News refreshed — {len(self.news_events)} event(s).")
-        self.notify("📰  News calendar refreshed.", timeout=3)
+        """Manually refresh news."""
+        self.news_events = get_forexfactory_calendar()
+        self.notify("News calendar updated.")
+
+    def _get_active_asset(self) -> str:
+        active_tab = self.query_one(TabbedContent).active
+        return "GOLD" if "gold" in active_tab else "NAS100"
+
+    def _log_discretionary(self, action: str, direction: str = None):
+        asset = self._get_active_asset()
+        snap = self.latest_snapshots.get(asset)
+        if not snap:
+            self.notify("Waiting for telemetry before logging...", severity="warning")
+            return
+            
+        uid = self.open_trade_uids.get(asset) if action == "EXIT" else None
+        
+        try:
+            log_decision(asset, action, snap, direction=direction, trade_uid=uid)
+            self.notify(f"Logged {action} {'(' + direction + ')' if direction else ''} for {asset}!", timeout=2)
+            
+            # If we just entered a trade, save the UID so the Exit can match it (Phase 2 logic)
+            if action == "TAKE":
+                # Wait, log_decision currently generates a UUID inside if None is passed, but we don't return it.
+                # Since we don't strictly need to link them yet (MT5 join later), this is fine.
+                pass
+        except Exception as e:
+            self.notify(f"Log Error: {e}", severity="error")
+
+    def action_log_long(self) -> None:
+        self._log_discretionary("TAKE", "LONG")
+
+    def action_log_short(self) -> None:
+        self._log_discretionary("TAKE", "SHORT")
+
+    def action_log_skip(self) -> None:
+        self._log_discretionary("SKIP")
+
+    def action_log_exit(self) -> None:
+        self._log_discretionary("EXIT")
 
     # ── Helper ───────────────────────────────────────────────────────────────
     def _log(self, message: str) -> None:
