@@ -365,8 +365,8 @@ def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: st
         lines = [
             f"[b bright_green]  ▲  BREAKOUT REGIME — ALGO UNLOCKED  [/b bright_green]\n",
             "[green]──────────────────────────────────────────[/green]\n\n",
-            "[dim]STRATEGY:[/dim]  [b white]ORB BREAKOUT (LONG / SHORT BIAS)[/b white]\n",
-            "[dim]ACTION  :[/dim]  [b bright_green]EXECUTE AT BREAKOUT CONFIRMATION[/b bright_green]\n",
+            "[dim]STRATEGY:[/dim]  [b white]TREND FOLLOWING[/b white]\n",
+            "[dim]ACTION  :[/dim]  [b bright_green]EXECUTE IN DIRECTION OF TREND[/b bright_green]\n",
             "[dim]SIZING   :[/dim]  [yellow]0.5x — WIDE ATR STOPS EXPECTED[/yellow]\n\n",
             f"[dim]CYCLE  {tick_sym}  {datetime.now().strftime('%H:%M:%S')}[/dim]",
         ]
@@ -375,8 +375,8 @@ def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: st
         lines = [
             f"[b bright_red]  ▼  COMPRESSION REGIME — ALGO LOCKED  [/b bright_red]\n",
             "[red]──────────────────────────────────────────[/red]\n\n",
-            "[dim]STRATEGY:[/dim]  [b white]MEAN REVERSION (VWAP FADE)[/b white]\n",
-            "[dim]ACTION  :[/dim]  [b bright_red]FADE EXTREMES — NO ORB ENTRY[/b bright_red]\n",
+            "[dim]STRATEGY:[/dim]  [b white]MEAN REVERSION[/b white]\n",
+            "[dim]ACTION  :[/dim]  [b bright_red]FADE EXTREMES — AVOID TREND ENTRIES[/b bright_red]\n",
             "[dim]SIZING   :[/dim]  [dim]0.25x — LOW VOLATILITY CAUTION[/dim]\n\n",
             f"[dim]CYCLE  {tick_sym}  {datetime.now().strftime('%H:%M:%S')}[/dim]",
         ]
