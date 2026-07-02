@@ -21,24 +21,45 @@ from sklearn.preprocessing import StandardScaler
 # 1.  DATA LOADING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_mt5_csv(path: str, sep: str = "\t") -> pd.DataFrame:
+def load_mt5_csv(path: str, sep: str = "\t", _is_retry: bool = False) -> pd.DataFrame:
     """Load an MT5-exported OHLCV CSV, handle both tab and comma delimiters."""
     try:
         df = pd.read_csv(path, sep=sep)
-        df.columns = df.columns.str.strip()
-        if "DateTime" in df.columns:
-            df["DateTime"] = pd.to_datetime(df["DateTime"],
+        df.columns = df.columns.str.strip().str.lower()
+        
+        # If it read it as one column, the delimiter is wrong
+        if len(df.columns) < 4:
+            raise ValueError("Insufficient columns, likely wrong delimiter.")
+            
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"],
                                             format="%Y.%m.%d %H:%M:%S",
                                             errors="coerce")
-            df.set_index("DateTime", inplace=True)
-        elif "Time" in df.columns:
-            df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-            df.set_index("Time", inplace=True)
+            df.set_index("datetime", inplace=True)
+        elif "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"], errors="coerce")
+            df.set_index("time", inplace=True)
+            
         df.sort_index(inplace=True)
-        df = df[df["Close"] > 0].copy()
+        if "close" in df.columns:
+            df = df[df["close"] > 0].copy()
+        
+        # Capitalize them back to what the rest of the code expects
+        rename_map = {"open": "Open", "high": "High", "low": "Low", "close": "Close", 
+                      "tick_volume": "Tick_Volume", "volume": "Volume"}
+        df.rename(columns=rename_map, inplace=True)
+        
+        # Spread might be missing in some historical data exports
+        if "spread" not in df.columns:
+            df["spread"] = 0
+            
         return df
-    except Exception:
-        return load_mt5_csv(path, sep="," if sep == "\t" else "\t")
+    except Exception as e:
+        if not _is_retry:
+            return load_mt5_csv(path, sep="," if sep == "\t" else "\t", _is_retry=True)
+        else:
+            print(f"CRITICAL ERROR loading {path}: {e}")
+            raise e
 
 
 def load_news_mask(json_path: str, index: pd.DatetimeIndex,
@@ -265,18 +286,7 @@ def build_features(df: pd.DataFrame,
     """
     Assemble the full feature matrix from raw OHLCV data.
 
-    All rolling computations use .shift(1) inside to ensure no current-bar
     leakage — features reflect information available at bar open only.
-
-    Parameters
-    ----------
-    df              : Raw OHLCV DataFrame (with TickVolume ideally)
-    news_mask_path  : path to ff_news_dates.json for news binary flag
-    news_buffer_min : ± buffer around news events in minutes
-
-    Returns
-    -------
-    Feature DataFrame (rows aligned with df.index)
     """
     feat = pd.DataFrame(index=df.index)
 
@@ -337,5 +347,5 @@ def build_features(df: pd.DataFrame,
                                            news_buffer_min).astype(int)
     else:
         feat["news_flag"] = 0
-
+        
     return feat
