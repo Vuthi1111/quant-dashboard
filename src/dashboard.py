@@ -567,6 +567,27 @@ class DashboardApp(App):
             drivers_str = " | ".join(top_drivers_list)
 
             # Calculate Regime State Persistence
+            if self.current_regimes[asset] is None:
+                # Run inference on the entire live buffer to find the true state start time
+                X_all = self.scalers[asset].transform(live_features[self.features[asset]].values.astype(np.float32))
+                probs_all = self.models[asset].predict_proba(X_all)[:, 1]
+                
+                regimes = np.full(len(probs_all), "NEUTRAL", dtype=object)
+                regimes[probs_all > PROB_HIGH] = "HIGH"
+                regimes[probs_all < PROB_LOW] = "LOW"
+                
+                current_regime_val = regimes[-1]
+                changed_indices = np.where(regimes != current_regime_val)[0]
+                
+                if len(changed_indices) > 0:
+                    last_change_idx = changed_indices[-1] + 1
+                    true_start_dt = live_features.index[last_change_idx]
+                else:
+                    true_start_dt = live_features.index[0]
+                    
+                self.current_regimes[asset] = current_regime_val
+                self.regime_start_times[asset] = true_start_dt
+
             if prob_high > PROB_HIGH:
                 new_regime = "HIGH"
             elif prob_high < PROB_LOW:
@@ -576,9 +597,9 @@ class DashboardApp(App):
                 
             if self.current_regimes[asset] != new_regime:
                 self.current_regimes[asset] = new_regime
-                self.regime_start_times[asset] = datetime.now()
+                self.regime_start_times[asset] = last_dt
                 
-            time_in_regime = datetime.now() - self.regime_start_times[asset]
+            time_in_regime = last_dt - self.regime_start_times[asset]
             mins, secs = divmod(int(time_in_regime.total_seconds()), 60)
             hrs, mins = divmod(mins, 60)
             time_str = f"{hrs}h {mins}m {secs}s" if hrs > 0 else f"{mins}m {secs}s"
