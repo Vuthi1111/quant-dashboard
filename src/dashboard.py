@@ -586,7 +586,10 @@ class DashboardApp(App):
                     true_start_dt = live_features.index[0]
                     
                 self.current_regimes[asset] = current_regime_val
-                self.regime_start_times[asset] = true_start_dt
+                
+                # Back-calculate the system time when this regime started (handling timezone differences between MT5 and local)
+                broker_elapsed = last_dt - true_start_dt
+                self.regime_start_times[asset] = datetime.now() - broker_elapsed
 
             if prob_high > PROB_HIGH:
                 new_regime = "HIGH"
@@ -597,9 +600,9 @@ class DashboardApp(App):
                 
             if self.current_regimes[asset] != new_regime:
                 self.current_regimes[asset] = new_regime
-                self.regime_start_times[asset] = last_dt
+                self.regime_start_times[asset] = datetime.now()
                 
-            time_in_regime = last_dt - self.regime_start_times[asset]
+            time_in_regime = datetime.now() - self.regime_start_times[asset]
             mins, secs = divmod(int(time_in_regime.total_seconds()), 60)
             hrs, mins = divmod(mins, 60)
             time_str = f"{hrs}h {mins}m {secs}s" if hrs > 0 else f"{mins}m {secs}s"
