@@ -27,20 +27,14 @@ The system features a zero-latency, pure-Python Terminal User Interface (TUI) po
 ### Multi-Asset Telemetry
 Real-time tracking of NAS100 and GOLD, displaying the last close, session highs/lows, exact tick volume, and live Bid/Ask spreads directly piped from MetaTrader 5.
 
-### Advanced Terminal Charting
-A Bloomberg-style charting engine built entirely in the terminal using `plotext`. 
-* Dynamically resamples 1-minute tick data into 5m, 15m, 30m, and 1H timeframes.
-* Allows toggling between Candlesticks, Line Charts, and Market Profile views.
-* Computes and overlays technical indicators (SMA-20, Bollinger Bands, and Point of Control lines) on the fly.
-
-### Institutional Market Profile (TPO)
-Generates dynamic Time Price Opportunity (TPO) bell curves across custom lookback horizons (1, 10, 30, or 90 days). The algorithm groups market action into 30-minute intervals, assigns classic TPO letters, and isolates the Point of Control (POC) for deep structural support/resistance analysis.
-
-### Liquidity Profiler
-Maps relative tick volume density against 120-period moving averages to identify sudden institutional participation or volume droughts.
+### ADR Exhaustion Tracker
+Measures the current intraday range against the rolling 20-Day Average Daily Range (ADR). This acts as a secondary filter against "Volatility Budget Exhaustion."
+* **< 40% (Green):** Trend continuation is highly likely.
+* **40% - 80% (Yellow):** Breakout edge deteriorates.
+* **> 80% (Red):** The daily volatility budget is exhausted. Breakout trades are highly likely to fail and mean-revert.
 
 ### Execution Matrix & Macro News Integration
-The Execution Matrix actively locks or unlocks based on the LightGBM probability engine. Additionally, the dashboard automatically polls the ForexFactory API for High-Impact USD macroeconomic data, initiating strict "News Blackouts" 2 minutes prior to major releases (e.g., CPI, NFP) to protect the algorithms from spread-widening events.
+The Execution Matrix actively locks or unlocks based on the LightGBM probability engine and the ADR Exhaustion filter. Additionally, the dashboard automatically polls the ForexFactory API for High-Impact USD macroeconomic data, initiating strict "News Blackouts" 2 minutes prior to major releases (e.g., CPI, NFP) to protect the algorithms from spread-widening events.
 
 ---
 

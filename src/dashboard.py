@@ -193,7 +193,7 @@ def make_ai_panel(prob_high: float, gk_current: float, gk_ratio: float,
 
 
 def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: str,
-                         update_count: int) -> Panel:
+                         update_count: int, adr_exhaustion: float = 0.0) -> Panel:
     tick_sym = "●" if update_count % 2 == 0 else "○"
 
     if is_blackout:
@@ -207,13 +207,16 @@ def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: st
         return Panel(Text.from_markup(body, justify="center"),
                      title=" ◈  EXECUTION MATRIX ", border_style="red", expand=True)
 
+    adr_color = "bright_green" if adr_exhaustion < 40 else ("yellow" if adr_exhaustion < 80 else "bright_red")
+    adr_str = f"[{adr_color}]{adr_exhaustion:.1f}%[/]"
+
     if prob_high > PROB_HIGH:
         lines = [
             f"[b bright_green]  ▲  BREAKOUT REGIME — ALGO UNLOCKED  [/b bright_green]\n",
             "[green]──────────────────────────────────────────[/green]\n\n",
             "[dim]STRATEGY:[/dim]  [b white]TREND FOLLOWING[/b white]\n",
             "[dim]ACTION  :[/dim]  [b bright_green]EXECUTE IN DIRECTION OF TREND[/b bright_green]\n",
-            "[dim]SIZING   :[/dim]  [yellow]0.5x — WIDE ATR STOPS EXPECTED[/yellow]\n\n",
+            f"[dim]ADR EXH :[/dim]  {adr_str}\n\n",
             f"[dim]CYCLE  {tick_sym}  {datetime.now().strftime('%H:%M:%S')}[/dim]",
         ]
         color = "bright_green"
@@ -223,7 +226,7 @@ def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: st
             "[red]──────────────────────────────────────────[/red]\n\n",
             "[dim]STRATEGY:[/dim]  [b white]MEAN REVERSION[/b white]\n",
             "[dim]ACTION  :[/dim]  [b bright_red]FADE EXTREMES — AVOID TREND ENTRIES[/b bright_red]\n",
-            "[dim]SIZING   :[/dim]  [dim]0.25x — LOW VOLATILITY CAUTION[/dim]\n\n",
+            f"[dim]ADR EXH :[/dim]  {adr_str}\n\n",
             f"[dim]CYCLE  {tick_sym}  {datetime.now().strftime('%H:%M:%S')}[/dim]",
         ]
         color = "bright_red"
@@ -233,7 +236,7 @@ def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: st
             "[yellow]──────────────────────────────────────────[/yellow]\n\n",
             "[dim]STRATEGY:[/dim]  [b white]HOLD — NO STATISTICAL EDGE[/b white]\n",
             "[dim]ACTION  :[/dim]  [b bright_yellow]SIT OUT — AWAIT REGIME CLARITY[/b bright_yellow]\n",
-            "[dim]SIZING   :[/dim]  [dim]0x — DO NOT TRADE[/dim]\n\n",
+            f"[dim]ADR EXH :[/dim]  {adr_str}\n\n",
             f"[dim]CYCLE  {tick_sym}  {datetime.now().strftime('%H:%M:%S')}[/dim]",
         ]
         color = "bright_yellow"
@@ -390,6 +393,7 @@ class DashboardApp(App):
         self.models = {"NAS100": None, "GOLD": None}
         self.scalers = {"NAS100": None, "GOLD": None}
         self.features = {"NAS100": None, "GOLD": None}
+        self.adr_20_map = {"NAS100": 1.0, "GOLD": 1.0}
 
     # ── Layout ──────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -432,6 +436,12 @@ class DashboardApp(App):
         
         for asset in ["NAS100", "GOLD"]:
             try:
+                hist_path = f"/Users/macos/Documents/ALGO/03_Data/raw/{asset}/1h_data.csv"
+                df_hist = await asyncio.to_thread(load_mt5_csv, hist_path)
+                df_daily = df_hist.resample('D').agg({'High': 'max', 'Low': 'min'}).dropna()
+                adr_20 = (df_daily['High'] - df_daily['Low']).rolling(20).mean().iloc[-1]
+                self.adr_20_map[asset] = adr_20
+                
                 m, s, f = await asyncio.to_thread(train_production_model, asset)
                 self.models[asset] = m
                 self.scalers[asset] = s
@@ -501,13 +511,22 @@ class DashboardApp(App):
                 "[b bright_red]▼ DECELERATING[/b bright_red]"
             )
 
+            # Calculate ADR Exhaustion
+            today = df_live.index[-1].date()
+            df_today = df_live[df_live.index.date == today]
+            if len(df_today) > 0 and self.adr_20_map.get(asset, 0) > 0:
+                intraday_range = df_today['High'].max() - df_today['Low'].min()
+                adr_exhaustion = (intraday_range / self.adr_20_map[asset]) * 100
+            else:
+                adr_exhaustion = 0.0
+
             # Execution logic & UI
             self.query_one(f"#{prefix}_market_data", Static).update(
                 make_market_panel(raw_state, last_dt, asset_title))
             self.query_one(f"#{prefix}_ai_core", Static).update(
                 make_ai_panel(prob_high, gk_current, gk_ratio, ewma_trend, self.prob_history[asset]))
             self.query_one(f"#{prefix}_execution", Static).update(
-                make_execution_panel(prob_high, is_blackout, blackout_title, self.update_count))
+                make_execution_panel(prob_high, is_blackout, blackout_title, self.update_count, adr_exhaustion))
                 
             # Liquidity Updater
             self.query_one(f"#{prefix}_liquidity", Static).update(
