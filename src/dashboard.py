@@ -116,39 +116,33 @@ def make_market_panel(raw_state, last_dt, asset_title: str) -> Panel:
     return Panel(t, title=" ◈  MARKET TELEMETRY ", border_style="bright_blue", expand=True)
 
 
-def make_ai_panel(prob_1h: float, prob_4h: float, gk_current: float, gk_ratio: float,
-                  ewma_trend: str, history_1h, history_4h, top_drivers_1h: str = "", top_drivers_4h: str = "") -> Panel:
+def make_single_core_panel(timeframe: str, prob: float, history: deque, top_drivers: str = "") -> Panel:
+    if prob > PROB_HIGH:
+        c, s = "bright_green", "▲ EXPANSIVE"
+    elif prob < PROB_LOW:
+        c, s = "bright_red", "▼ COMPRESSIVE"
+    else:
+        c, s = "bright_yellow", "◆ UNCERTAIN"
+        
+    if top_drivers == "INSUFFICIENT BARS":
+        return Panel(Text(f"\n\n[dim]INSUFFICIENT DATA BARS FOR {timeframe} CORE[/dim]\n[dim]Check MT5 Export Settings[/dim]", justify="center"), 
+                     title=f" ◈  {timeframe} INFERENCE CORE ", border_style="dim", expand=True)
+
+    filled = int(prob * 50)
+    bar = f"[{c}]{'█'*filled}[/{c}][dim]{'░'*(50-filled)}[/dim]"
+
+    t = Table(show_header=False, expand=True, box=None, padding=(0, 1))
+    t.add_column("L", style="dim", ratio=1)
+    t.add_column("V", justify="right", ratio=2)
+
+    t.add_row("HIGH-VOL PROBABILITY", f"[b {c}]{prob*100:5.1f}%[/]")
+    t.add_row("REGIME STATE", f"[b {c}]{s}[/]")
+    t.add_row("", "")
+    t.add_row("[dim]CONFIDENCE[/dim]", bar)
+    t.add_row("PROBABILITY HISTORY", render_sparkline(history))
+    t.add_row("[b yellow]PRIMARY DRIVERS[/b yellow]", f"[yellow]{top_drivers}[/]")
     
-    def _get_state(prob):
-        if prob > PROB_HIGH: return "bright_green", "▲ EXPANSIVE", int(prob * 50)
-        elif prob < PROB_LOW: return "bright_red", "▼ COMPRESSIVE", int(prob * 50)
-        return "bright_yellow", "◆ UNCERTAIN", int(prob * 50)
-
-    c1, s1, f1 = _get_state(prob_1h)
-    c4, s4, f4 = _get_state(prob_4h)
-
-    bar_1h = f"[{c1}]{'█'*f1}[/{c1}][dim]{'░'*(50-f1)}[/dim]"
-    bar_4h = f"[{c4}]{'█'*f4}[/{c4}][dim]{'░'*(50-f4)}[/dim]"
-
-    t = Table(show_header=True, expand=True, box=None, padding=(0, 1))
-    t.add_column("METRIC", style="dim", ratio=2)
-    t.add_column("1-HOUR CORE", justify="right", ratio=3)
-    t.add_column("4-HOUR CORE", justify="right", ratio=3)
-
-    t.add_row("PROBABILITY", f"[b {c1}]{prob_1h*100:5.1f}%[/]", f"[b {c4}]{prob_4h*100:5.1f}%[/]")
-    t.add_row("REGIME STATE", f"[b {c1}]{s1}[/]", f"[b {c4}]{s4}[/]")
-    t.add_row("", "", "")
-    t.add_row("[dim]CONFIDENCE[/dim]", bar_1h, bar_4h)
-    t.add_row("PROBABILITY HISTORY", render_sparkline(history_1h), render_sparkline(history_4h))
-    t.add_row("[b yellow]PRIMARY DRIVERS[/b yellow]", f"[yellow]{top_drivers_1h}[/]", f"[yellow]{top_drivers_4h}[/]")
-    t.add_row("", "", "")
-    t.add_row("GARMAN-KLASS (10H)", f"[cyan]{gk_current:.6f}[/]", "")
-    t.add_row("GK vs 30D BASELINE", f"[{'green' if gk_ratio > 1 else 'dim'}]{gk_ratio:.2f}x[/]", "")
-    t.add_row("EWMA MOMENTUM", ewma_trend, "")
-    t.add_row("", "", "")
-    t.add_row("THRESHOLD  HIGH/LOW", f"[green]{PROB_HIGH*100:.0f}%[/] / [red]{PROB_LOW*100:.0f}%[/]", "")
-
-    return Panel(t, title=" ◈  DUAL-TIMEFRAME INFERENCE MATRIX ", border_style="magenta", expand=True)
+    return Panel(t, title=f" ◈  {timeframe} INFERENCE CORE ", border_style="magenta", expand=True)
 
 
 def make_execution_panel(prob_high: float, is_blackout: bool, blackout_title: str,
@@ -299,14 +293,18 @@ class DashboardApp(App):
         height: 1fr;
     }
 
-    /* Main grid — 2 columns × 2 rows */
+    /* Main grid — 2 columns × 3 rows */
     Grid.main-grid {
-        grid-size: 2 2;
+        grid-size: 2 3;
         grid-columns: 1fr 1fr;
-        grid-rows: 1fr 1fr;
+        grid-rows: 1fr 1.5fr 1fr;
         height: 1fr;
         padding: 0;
         margin: 0;
+    }
+    
+    .span-2 {
+        column-span: 2;
     }
 
     /* Macro Grid — 2 columns */
@@ -384,16 +382,18 @@ class DashboardApp(App):
             with TabPane("⚡ NAS100", id="tab-nas100"):
                 with Grid(id="nas100-grid", classes="main-grid"):
                     yield Static(Panel(Text("\n\n⏳  Loading market telemetry…", justify="center"), border_style="dim", expand=True), id="nas100_market_data", classes="panel")
-                    yield Static(Panel(Text("\n\n⏳  Compiling LightGBM inference core…", justify="center"), border_style="dim", expand=True), id="nas100_ai_core", classes="panel")
                     yield Static(Panel(Text("\n\n⏳  Fetching macro calendar…", justify="center"), border_style="dim", expand=True), id="nas100_news", classes="panel")
-                    yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="nas100_execution", classes="panel")
+                    yield Static(Panel(Text("\n\n⏳  Compiling 1H Inference Core…", justify="center"), border_style="dim", expand=True), id="nas100_1h_core", classes="panel")
+                    yield Static(Panel(Text("\n\n⏳  Compiling 4H Inference Core…", justify="center"), border_style="dim", expand=True), id="nas100_4h_core", classes="panel")
+                    yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="nas100_execution", classes="panel span-2")
                     
             with TabPane("⚡ GOLD", id="tab-gold"):
                 with Grid(id="gold-grid", classes="main-grid"):
                     yield Static(Panel(Text("\n\n⏳  Loading market telemetry…", justify="center"), border_style="dim", expand=True), id="gold_market_data", classes="panel")
-                    yield Static(Panel(Text("\n\n⏳  Compiling LightGBM inference core…", justify="center"), border_style="dim", expand=True), id="gold_ai_core", classes="panel")
                     yield Static(Panel(Text("\n\n⏳  Fetching macro calendar…", justify="center"), border_style="dim", expand=True), id="gold_news", classes="panel")
-                    yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="gold_execution", classes="panel")
+                    yield Static(Panel(Text("\n\n⏳  Compiling 1H Inference Core…", justify="center"), border_style="dim", expand=True), id="gold_1h_core", classes="panel")
+                    yield Static(Panel(Text("\n\n⏳  Compiling 4H Inference Core…", justify="center"), border_style="dim", expand=True), id="gold_4h_core", classes="panel")
+                    yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="gold_execution", classes="panel span-2")
 
             with TabPane("🌊 Liquidity Profile", id="tab-liquidity"):
                 with Grid(id="liquidity-grid", classes="macro-grid"):
