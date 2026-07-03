@@ -599,21 +599,31 @@ class DashboardApp(App):
                 adr_exhaustion = 0.0
 
         # Execution logic & UI
+            raw_state = df_live.iloc[[-1]]
+            last_dt = df_live.index[-1]
             self.query_one(f"#{prefix}_market_data", Static).update(
-                make_market_panel(raw_state, last_dt, asset_title))
-            self.query_one(f"#{prefix}_ai_core", Static).update(
-                make_ai_panel(prob_high, gk_current, gk_ratio, ewma_trend, self.prob_history[asset], drivers_str))
-            self.query_one(f"#{prefix}_execution", Static).update(
-                make_execution_panel(prob_high, is_blackout, blackout_title, self.update_count, adr_exhaustion, time_str))
+                make_market_panel(raw_state, last_dt, asset))
+                
+            panel_1h = make_single_core_panel("1H", prob_1h, self.prob_history[asset]["1H"], drv_1h)
+            panel_4h = make_single_core_panel("4H", prob_4h, self.prob_history[asset]["4H"], drv_4h)
+            
+            self.query_one(f"#{prefix}_1h_core", Static).update(panel_1h)
+            self.query_one(f"#{prefix}_4h_core", Static).update(panel_4h)
+
+            exec_panel = make_execution_panel(
+                prob_1h, is_blackout, blackout_title,
+                self.update_count, adr_exhaustion, time_1h
+            )
+            self.query_one(f"#{prefix}_execution", Static).update(exec_panel)
                 
             # Liquidity Updater
             self.query_one(f"#{prefix}_liquidity", Static).update(
-                make_liquidity_panel(asset_title, df_live))
+                make_liquidity_panel(asset, df_live))
                 
             if self.update_count % 60 == 0:
                 self._log(
                     f"[{asset} TICK #{self.update_count:05d}]  "
-                    f"P(High)={prob_high*100:.1f}%  "
+                    f"P(High)={prob_1h*100:.1f}%  "
                     f"GK={gk_current:.6f}  "
                     f"GK-ratio={gk_ratio:.2f}x  "
                     f"BLACKOUT={'YES' if is_blackout else 'NO'}"
@@ -636,7 +646,8 @@ class DashboardApp(App):
             err = Panel(
                 Text.from_markup(f"[b red]⚠  INFERENCE ERROR ({asset})[/b red]\n\n{exc}", justify="center"),
                 border_style="red", expand=True)
-            self.query_one(f"#{prefix}_ai_core", Static).update(err)
+            self.query_one(f"#{prefix}_1h_core", Static).update(err)
+            self.query_one(f"#{prefix}_4h_core", Static).update(err)
             self._log(f"[ERROR] Inference failed for {asset}: {exc}")
 
 
