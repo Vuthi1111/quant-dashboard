@@ -70,6 +70,7 @@ def train_logistic(X_train: np.ndarray, y_train: np.ndarray,
 
 def train_lightgbm(X_train: np.ndarray, y_train: np.ndarray,
                    X_val: np.ndarray,   y_val: np.ndarray,
+                   w_train: np.ndarray = None,
                    n_trials: int = 30) -> lgb.Booster:
     """
     LightGBM classifier with Bayesian hyperparameter optimisation on validation fold.
@@ -97,7 +98,7 @@ def train_lightgbm(X_train: np.ndarray, y_train: np.ndarray,
         }
         n_est = trial.suggest_int("n_estimators", 100, 600)
         # Recreate Dataset each trial — prevents feature_pre_filter cache conflict
-        dtrain_t = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
+        dtrain_t = lgb.Dataset(X_train, label=y_train, weight=w_train, free_raw_data=False)
         dval_t   = lgb.Dataset(X_val,   label=y_val,   free_raw_data=False,
                                reference=dtrain_t)
         model = lgb.train(params, dtrain_t, num_boost_round=n_est,
@@ -105,6 +106,8 @@ def train_lightgbm(X_train: np.ndarray, y_train: np.ndarray,
                           callbacks=[lgb.early_stopping(50, verbose=False),
                                      lgb.log_evaluation(-1)])
         pred = model.predict(X_val)
+        if len(np.unique(y_val)) < 2:
+            return 0.5
         return roc_auc_score(y_val, pred)
 
     study = optuna.create_study(direction="maximize",
@@ -116,7 +119,7 @@ def train_lightgbm(X_train: np.ndarray, y_train: np.ndarray,
     n_est = best.pop("n_estimators")
     best.update({"objective": "binary", "metric": "auc", "verbosity": -1,
                  "feature_pre_filter": False})
-    dtrain_f = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
+    dtrain_f = lgb.Dataset(X_train, label=y_train, weight=w_train, free_raw_data=False)
     dval_f   = lgb.Dataset(X_val,   label=y_val,   free_raw_data=False,
                            reference=dtrain_f)
     model = lgb.train(best, dtrain_f, num_boost_round=n_est,
@@ -262,13 +265,20 @@ class MetaLearner:
     """
     def __init__(self):
         self.model = LogisticRegression(C=1.0, max_iter=500)
+        self.single_class = None
 
     def fit(self, p_lr: np.ndarray, p_lgbm: np.ndarray,
             p_lstm: np.ndarray, y: np.ndarray):
         """p_* are probabilities from each L1 model on validation fold."""
         X_meta = self._stack(p_lr, p_lgbm, p_lstm)
-        mask   = ~np.isnan(X_meta).any(axis=1)
-        self.model.fit(X_meta[mask], y[mask])
+        mask = ~np.isnan(X_meta).any(axis=1) & ~np.isnan(y)
+        if mask.sum() > 0:
+            if len(np.unique(y[mask])) < 2:
+                self.single_class = y[mask][0]
+                self.model = None
+            else:
+                self.single_class = None
+                self.model.fit(X_meta[mask], y[mask])
 
     def predict_proba(self, p_lr: np.ndarray, p_lgbm: np.ndarray,
                       p_lstm: np.ndarray) -> np.ndarray:
@@ -276,7 +286,10 @@ class MetaLearner:
         mask   = ~np.isnan(X_meta).any(axis=1)
         out    = np.full(len(X_meta), np.nan)
         if mask.sum() > 0:
-            out[mask] = self.model.predict_proba(X_meta[mask])[:, 1]
+            if self.single_class is not None:
+                out[mask] = self.single_class
+            else:
+                out[mask] = self.model.predict_proba(X_meta[mask])[:, 1]
         return out
 
     @staticmethod
@@ -304,7 +317,8 @@ class FoldResult:
 def run_fold(fold,
              X_full: np.ndarray,
              y_full: np.ndarray,
-             feature_names: list,
+             w_full: np.ndarray = None,
+             feature_names: list = None,
              n_pca_components: int = 25,
              lgbm_trials: int = 25,
              lstm_seq_len: int = 20,
@@ -323,6 +337,7 @@ def run_fold(fold,
     # ── Extract splits
     X_tr = X_full[fold.train_idx]
     y_tr = y_full[fold.train_idx]
+    w_tr = w_full[fold.train_idx] if w_full is not None else None
     X_va = X_full[fold.val_idx]
     y_va = y_full[fold.val_idx]
     X_te = X_full[fold.test_idx]
@@ -352,7 +367,7 @@ def run_fold(fold,
 
     # ── L1 Model 2: LightGBM
     print(f"  [Fold {fold.fold_id}|{fold.window_type}] Training LightGBM ({lgbm_trials} trials)...")
-    lgbm_model = train_lightgbm(X_tr_p, y_tr, X_va_p, y_va, n_trials=lgbm_trials)
+    lgbm_model = train_lightgbm(X_tr_p, y_tr, X_va_p, y_va, w_train=w_tr, n_trials=lgbm_trials)
     p_lgbm_va  = lgbm_model.predict(X_va_p)
     p_lgbm_te  = lgbm_model.predict(X_te_p)
 

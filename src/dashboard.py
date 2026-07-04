@@ -37,7 +37,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from feature_engineering import load_mt5_csv, build_features, resample_to_4h
 from news_fetcher import get_forexfactory_calendar, check_news_blackout
-from live_inference import train_production_model, LIVE_NAS100_PATH, LIVE_GOLD_PATH, PROB_HIGH, PROB_LOW
+from live_inference import (train_production_model, train_vwap_copilot_model,
+                            compute_vwap_copilot_state,
+                            LIVE_NAS100_PATH, LIVE_GOLD_PATH, PROB_HIGH, PROB_LOW)
 from decision_logger import init_db, log_decision
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,29 +244,103 @@ def make_news_panel(events: list, is_blackout: bool) -> Panel:
     return Panel(t, title=" ◈  MACROECONOMIC CALENDAR  (USD HIGH IMPACT) ",
                  border_style=border, expand=True)
 
-def make_liquidity_panel(asset_title: str, df: pd.DataFrame) -> Panel:
-    volumes = df['Tick_Volume'].tail(120).values
-    current_vol = volumes[-1]
-    avg_vol = np.mean(volumes[:-1]) if len(volumes) > 1 else current_vol
-    
-    if avg_vol == 0: avg_vol = 1
-    rel_vol = (current_vol / avg_vol) * 100
-    
-    vol_color = "bright_green" if rel_vol > 150 else ("white" if rel_vol > 80 else "dim")
-    
+# Liquidity panel removed as requested.
+
+def make_vwap_copilot_panel(state: dict, prob_history: deque) -> Panel:
+    """Build the 15M VWAP Scalping Copilot panel for GOLD."""
+    z = state.get('vwap_zscore', float('nan'))
+    prob = state.get('ml_probability', float('nan'))
+    hurst = state.get('hurst', float('nan'))
+    vr = state.get('vol_ratio', float('nan'))
+    regime = state.get('regime_context', 'COMPUTING...')
+    signal = state.get('signal', 'WARMING UP')
+    sig_color = state.get('signal_color', 'dim')
+
     t = Table(show_header=False, expand=True, box=None, padding=(0, 1))
-    t.add_column("Label", style="dim", ratio=2)
-    t.add_column("Value", justify="right", ratio=3)
-    
-    t.add_row("[bold white]INSTRUMENT[/bold white]", f"[b bright_cyan]{asset_title}[/b bright_cyan]")
+    t.add_column("L", style="dim", ratio=2)
+    t.add_column("V", justify="right", ratio=3)
+
+    # VWAP Z-Score with color
+    if not np.isnan(z):
+        if abs(z) >= 2.0:
+            z_color = "bright_red" if z > 0 else "bright_green"
+        elif abs(z) >= 1.5:
+            z_color = "yellow"
+        else:
+            z_color = "white"
+        t.add_row("VWAP Z-SCORE", f"[b {z_color}]{z:+.2f}σ[/b {z_color}]")
+    else:
+        t.add_row("VWAP Z-SCORE", "[dim]—[/dim]")
+
+    # ML Probability
+    if not np.isnan(prob):
+        p_color = "bright_green" if prob >= 0.70 else ("yellow" if prob >= 0.55 else "dim")
+        filled = int(prob * 30)
+        bar = f"[{p_color}]{'█' * filled}[/{p_color}][dim]{'░' * (30 - filled)}[/dim]"
+        t.add_row("ML REVERSION PROB", f"[b {p_color}]{prob*100:.1f}%[/b {p_color}]")
+        t.add_row("[dim]CONFIDENCE[/dim]", bar)
+    else:
+        t.add_row("ML REVERSION PROB", "[dim]—[/dim]")
+        t.add_row("[dim]CONFIDENCE[/dim]", "[dim]——————————————————————————[/dim]")
+
     t.add_row("", "")
-    t.add_row("CURRENT BAR VOLUME", f"[b {vol_color}]{int(current_vol):,}[/b {vol_color}]")
-    t.add_row("MOVING AVERAGE (120)", f"[white]{int(avg_vol):,}[/white]")
-    t.add_row("RELATIVE LIQUIDITY", f"[b {vol_color}]{rel_vol:.1f}%[/b {vol_color}]")
+
+    # Hurst context
+    if not np.isnan(hurst):
+        if hurst < 0.45:
+            h_color = "cyan"
+            regime = "MEAN-REVERTING"
+        elif hurst > 0.55:
+            h_color = "magenta"
+            regime = "TRENDING"
+        else:
+            h_color = "yellow"
+            regime = "RANDOM WALK"
+        t.add_row("HURST (32-bar)", f"[{h_color}]{hurst:.3f} ({regime})[/{h_color}]")
+    else:
+        t.add_row("HURST (32-bar)", "[dim]—[/dim]")
+
+    # Vol ratio
+    if not np.isnan(vr):
+        vr_color = "magenta" if vr > 1.5 else ("yellow" if vr > 1.0 else "cyan")
+        t.add_row("VOL RATIO (16/96)", f"[{vr_color}]{vr:.2f}x[/{vr_color}]")
+    else:
+        t.add_row("VOL RATIO (16/96)", "[dim]—[/dim]")
+
+    # Sparkline
+    t.add_row("PROB HISTORY", render_sparkline(prob_history))
+
     t.add_row("", "")
-    t.add_row("LIQUIDITY DENSITY MAP", render_volume_bars(volumes))
+
+    # Signal
+    t.add_row("[b white]SYSTEM STATE[/b white]", f"[b {sig_color}]{signal}[/b {sig_color}]")
+
+    return Panel(t, title=" ◈  15M STATISTICAL COPILOT ", border_style="blue", expand=True)
+
+
+def make_macro_environment_panel(current_state: pd.DataFrame) -> Panel:
+    t_horiz = Table(show_header=False, expand=True, box=None)
+    t_horiz.add_column("1", justify="center")
+    t_horiz.add_column("2", justify="center")
+    t_horiz.add_column("3", justify="center")
+    t_horiz.add_column("4", justify="center")
     
-    return Panel(t, title=" ◈  LIQUIDITY PROFILER ", border_style="blue", expand=True)
+    def get_val(col):
+        return float(current_state[col].values[0]) if col in current_state.columns else 0.0
+        
+    vix = get_val("macro_vix")
+    dxy = get_val("macro_dxy")
+    tnx = get_val("macro_tnx")
+    hyg = get_val("macro_hyg")
+    
+    t_horiz.add_row(
+        f"[cyan]VIX:[/cyan] [b white]{vix:.2f}[/]",
+        f"[cyan]DXY:[/cyan] [b white]{dxy:.2f}[/]",
+        f"[cyan]TNX:[/cyan] [b white]{tnx:.2f}%[/]",
+        f"[cyan]HYG:[/cyan] [b white]${hyg:.2f}[/]"
+    )
+    
+    return Panel(t_horiz, title=" ◈  MACRO ENVIRONMENT (T-1) ", border_style="cyan", expand=True)
 
 
 def make_waiting_panel(csv_path: Path) -> Panel:
@@ -293,7 +369,7 @@ class DashboardApp(App):
         height: 1fr;
     }
 
-    /* Main grid — 2 columns × 3 rows */
+    /* Main grid — 2 columns × 3 rows (NAS100) */
     Grid.main-grid {
         grid-size: 2 3;
         grid-columns: 1fr 1fr;
@@ -302,9 +378,27 @@ class DashboardApp(App):
         padding: 0;
         margin: 0;
     }
-    
+
+    /* Gold grid — 3 columns × 3 rows with VWAP Copilot spanning rows 1-2 */
+    Grid.gold-grid {
+        grid-size: 3 3;
+        grid-columns: 1fr 1fr 1.4fr;
+        grid-rows: 1fr 1fr 1fr;
+        height: 1fr;
+        padding: 0;
+        margin: 0;
+    }
+
     .span-2 {
         column-span: 2;
+    }
+
+    .span-3 {
+        column-span: 3;
+    }
+
+    .row-span-2 {
+        row-span: 2;
     }
 
     /* Macro Grid — 2 columns */
@@ -359,10 +453,13 @@ class DashboardApp(App):
         
         self.prob_history = {
             "NAS100": {"1H": deque(maxlen=PROB_HISTORY_LEN), "4H": deque(maxlen=PROB_HISTORY_LEN)},
-            "GOLD": {"1H": deque(maxlen=PROB_HISTORY_LEN), "4H": deque(maxlen=PROB_HISTORY_LEN)}
+            "GOLD": {"1H": deque(maxlen=PROB_HISTORY_LEN), "4H": deque(maxlen=PROB_HISTORY_LEN),
+                     "15M_VWAP": deque(maxlen=PROB_HISTORY_LEN)}
         }
         self.models = {"NAS100": None, "GOLD": None}  # Now holds dicts {"1H": (m, s, f), "4H": (m, s, f)}
         self.adr_20_map = {"NAS100": 1.0, "GOLD": 1.0}
+        self.vwap_copilot = None  # (model, feature_cols) for 15M VWAP Copilot
+        self.vwap_copilot_state = {}  # Latest copilot state dict
         
         # Regime State Tracking (Now tracking both timeframes)
         self.current_regimes = {"NAS100": {"1H": None, "4H": None}, "GOLD": {"1H": None, "4H": None}}
@@ -378,6 +475,7 @@ class DashboardApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(Panel("", title=" ◈  MACRO CONFLUENCE ", border_style="dim"), id="macro_confluence")
+        yield Static(Panel("", title=" ◈  MACRO ENVIRONMENT (T-1) ", border_style="dim"), id="macro_environment")
         with TabbedContent(initial="tab-nas100"):
             with TabPane("⚡ NAS100", id="tab-nas100"):
                 with Grid(id="nas100-grid", classes="main-grid"):
@@ -388,17 +486,18 @@ class DashboardApp(App):
                     yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="nas100_execution", classes="panel span-2")
                     
             with TabPane("⚡ GOLD", id="tab-gold"):
-                with Grid(id="gold-grid", classes="main-grid"):
+                with Grid(id="gold-grid", classes="gold-grid"):
+                    # Col 1: Market Telemetry (row 1) | News (row 2)
                     yield Static(Panel(Text("\n\n⏳  Loading market telemetry…", justify="center"), border_style="dim", expand=True), id="gold_market_data", classes="panel")
-                    yield Static(Panel(Text("\n\n⏳  Fetching macro calendar…", justify="center"), border_style="dim", expand=True), id="gold_news", classes="panel")
+                    # Col 2: 1H Core (row 1) | 4H Core (row 2)
                     yield Static(Panel(Text("\n\n⏳  Compiling 1H Inference Core…", justify="center"), border_style="dim", expand=True), id="gold_1h_core", classes="panel")
+                    # Col 3: VWAP Copilot (rows 1-2, tall)
+                    yield Static(Panel(Text("\n\n⏳  Booting 15M VWAP Copilot…", justify="center"), border_style="bright_magenta", expand=True), id="gold_vwap_copilot", classes="panel row-span-2")
+                    # Row 2
+                    yield Static(Panel(Text("\n\n⏳  Fetching macro calendar…", justify="center"), border_style="dim", expand=True), id="gold_news", classes="panel")
                     yield Static(Panel(Text("\n\n⏳  Compiling 4H Inference Core…", justify="center"), border_style="dim", expand=True), id="gold_4h_core", classes="panel")
-                    yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="gold_execution", classes="panel span-2")
-
-            with TabPane("🌊 Liquidity Profile", id="tab-liquidity"):
-                with Grid(id="liquidity-grid", classes="macro-grid"):
-                    yield Static(Panel(Text("\n\n⏳  Waiting for NAS100 data stream...", justify="center"), border_style="dim", expand=True), id="nas100_liquidity", classes="panel")
-                    yield Static(Panel(Text("\n\n⏳  Waiting for GOLD data stream...", justify="center"), border_style="dim", expand=True), id="gold_liquidity", classes="panel")
+                    # Row 3: Execution Matrix (full width)
+                    yield Static(Panel(Text("\n\n🔒  Execution matrix locked (booting)…", justify="center"), border_style="dim", expand=True), id="gold_execution", classes="panel span-3")
 
             with TabPane("🖥  System Logs", id="tab-logs"):
                 yield Log(id="syslog", max_lines=LOG_MAX_LINES)
@@ -438,7 +537,16 @@ class DashboardApp(App):
                 self._log(f"[ERROR] {asset} Model training failed: {e}")
                 self.notify(f"⚠  {asset} Model error: {e}", severity="error", timeout=10)
 
-        self.notify("✅  System Ready — Multi-Asset Telemetry active.", timeout=4)
+        # Train VWAP Copilot Model (15M Gold Scalping)
+        try:
+            self._log("Training 15M VWAP Copilot model on historical Gold data…")
+            self.vwap_copilot = await asyncio.to_thread(train_vwap_copilot_model)
+            self._log("15M VWAP Copilot model compiled successfully.")
+        except Exception as e:
+            self._log(f"[ERROR] VWAP Copilot training failed: {e}")
+            self.notify(f"⚠  VWAP Copilot error: {e}", severity="error", timeout=10)
+
+        self.notify("✅  System Ready — Multi-Asset Telemetry + VWAP Copilot active.", timeout=4)
 
         self._log("Starting live polling loop (1 s interval).")
         self.set_interval(1.0, self.update_dashboard)
@@ -568,13 +676,22 @@ class DashboardApp(App):
             # 1H Inference
             prob_1h, drv_1h, time_1h, lf_1h, cs_1h = await self._compute_inference(asset, df_live, "1H")
             
-            # 4H Inference
+            # For NAS100: 4H Inference as before
+            # For GOLD: both 4H Inference + 15M VWAP Copilot
             df_live_4h = await asyncio.to_thread(resample_to_4h, df_live)
             if len(df_live_4h) < 20:
-                # Fallback if there isn't enough data
                 prob_4h, drv_4h, time_4h = prob_1h, "INSUFFICIENT BARS", "0m"
             else:
                 prob_4h, drv_4h, time_4h, _, _ = await self._compute_inference(asset, df_live_4h, "4H")
+
+            if asset == "GOLD" and self.vwap_copilot is not None:
+                vwap_model, vwap_feat_cols = self.vwap_copilot
+                self.vwap_copilot_state = await asyncio.to_thread(
+                    compute_vwap_copilot_state, df_live, vwap_model, vwap_feat_cols
+                )
+                ml_p = self.vwap_copilot_state.get('ml_probability', float('nan'))
+                if not np.isnan(ml_p):
+                    self.prob_history["GOLD"]["15M_VWAP"].append(ml_p)
 
             # 1H Metrics
             gk_current = float(cs_1h["GK_10"].values[0])
@@ -604,21 +721,29 @@ class DashboardApp(App):
             self.query_one(f"#{prefix}_market_data", Static).update(
                 make_market_panel(raw_state, last_dt, asset))
                 
+            # Update macro environment panel (we can do this for either asset since macro is shared)
+            self.query_one("#macro_environment", Static).update(
+                make_macro_environment_panel(cs_1h)
+            )
+                
             panel_1h = make_single_core_panel("1H", prob_1h, self.prob_history[asset]["1H"], drv_1h)
-            panel_4h = make_single_core_panel("4H", prob_4h, self.prob_history[asset]["4H"], drv_4h)
-            
             self.query_one(f"#{prefix}_1h_core", Static).update(panel_1h)
+
+            panel_4h = make_single_core_panel("4H", prob_4h, self.prob_history[asset]["4H"], drv_4h)
             self.query_one(f"#{prefix}_4h_core", Static).update(panel_4h)
+
+            if asset == "GOLD":
+                copilot_panel = make_vwap_copilot_panel(
+                    self.vwap_copilot_state,
+                    self.prob_history["GOLD"]["15M_VWAP"]
+                )
+                self.query_one("#gold_vwap_copilot", Static).update(copilot_panel)
 
             exec_panel = make_execution_panel(
                 prob_1h, is_blackout, blackout_title,
                 self.update_count, adr_exhaustion, time_1h
             )
             self.query_one(f"#{prefix}_execution", Static).update(exec_panel)
-                
-            # Liquidity Updater
-            self.query_one(f"#{prefix}_liquidity", Static).update(
-                make_liquidity_panel(asset, df_live))
                 
             if self.update_count % 60 == 0:
                 self._log(
@@ -631,7 +756,7 @@ class DashboardApp(App):
             
             # Update snapshot for discretionary logger
             time_in_regime = datetime.now() - self.regime_start_times[asset]["1H"]
-            self.latest_snapshots[asset] = {
+            snapshot = {
                 "prob_high": prob_1h,
                 "regime_state": self.current_regimes[asset]["1H"],
                 "state_time_seconds": int(time_in_regime.total_seconds()),
@@ -641,6 +766,13 @@ class DashboardApp(App):
                 "macro_confluence": self.macro_confluence_str,
                 "is_news_blackout": is_blackout
             }
+            # Add VWAP Copilot fields for GOLD
+            if asset == "GOLD" and self.vwap_copilot_state:
+                snapshot["vwap_zscore"] = self.vwap_copilot_state.get("vwap_zscore")
+                snapshot["ml_reversion_prob"] = self.vwap_copilot_state.get("ml_probability")
+                snapshot["hurst"] = self.vwap_copilot_state.get("hurst")
+                snapshot["copilot_signal"] = self.vwap_copilot_state.get("signal")
+            self.latest_snapshots[asset] = snapshot
 
         except Exception as exc:
             err = Panel(
