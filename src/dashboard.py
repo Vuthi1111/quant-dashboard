@@ -503,13 +503,17 @@ class DashboardApp(App):
 
     # ── Boot ──────────────────────────────────────────────────────────────────
     async def on_mount(self) -> None:
+        # We start the heavy boot sequence in the background so the UI renders immediately.
+        asyncio.create_task(self.boot_sequence())
+
+    async def boot_sequence(self) -> None:
         boot_log = self.query_one("#boot_log", Log)
         boot_start = time_module.time()
 
         async def boot_msg(msg: str):
             elapsed = time_module.time() - boot_start
             boot_log.write_line(f"[{elapsed:6.1f}s]  {msg}")
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
 
         await boot_msg("Dashboard v4.0 initialised — 5 inference cores.")
         await boot_msg("Fetching ForexFactory macro calendar…")
