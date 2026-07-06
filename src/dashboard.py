@@ -429,6 +429,8 @@ class DashboardApp(App):
 
     BINDINGS = [
         ("q", "quit",         "Quit"),
+        ("escape", "quit",    "Quit"),
+        ("ctrl+c", "force_quit", "Force Quit"),
         ("t", "toggle_dark",  "Theme"),
         ("r", "reload_news",  "Refresh News"),
         ("w", "log_long",     "Log Long"),
@@ -829,6 +831,9 @@ class DashboardApp(App):
     def action_log_exit(self) -> None:
         self._log_discretionary("EXIT")
 
+    def action_force_quit(self) -> None:
+        self.exit()
+
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         try:
@@ -838,4 +843,7 @@ class DashboardApp(App):
 
 if __name__ == "__main__":
     app = DashboardApp()
-    app.run()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        pass
