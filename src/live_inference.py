@@ -16,12 +16,14 @@ import lightgbm as lgb
 from sklearn.preprocessing import StandardScaler
 
 # Import our custom feature engineering
-from feature_engineering import load_mt5_csv, build_features, build_vol_regime_labels, resample_to_4h
+from feature_engineering import load_mt5_csv, build_features, build_vol_regime_labels, resample_to_4h, resample_to_15m
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PATHS
 # ─────────────────────────────────────────────────────────────────────────────
 ROOT = Path("/Users/macos/Documents/ALGO")
+PROJECT_ROOT = ROOT / "projects" / "volatility_regime_model"
+sys.path.insert(0, str(PROJECT_ROOT))
 
 def get_historical_path(asset: str) -> Path:
     if asset == "NAS100":
@@ -30,9 +32,19 @@ def get_historical_path(asset: str) -> Path:
         return ROOT / "03_Data" / "raw" / "GOLD_XAUUSD" / "XAUUSD_1H.csv"
     raise ValueError(f"Unknown asset: {asset}")
 
+def get_historical_1m_path(asset: str) -> Path:
+    if asset == "NAS100":
+        return ROOT / "03_Data" / "raw" / "NAS100" / "1m_data.csv"
+    elif asset == "GOLD":
+        return ROOT / "03_Data" / "raw" / "GOLD_XAUUSD" / "XAUUSD_M1.csv"
+    raise ValueError(f"Unknown asset: {asset}")
+
 # We dynamically point this directly to your CrossOver MT5 folder!
 LIVE_NAS100_PATH = Path(os.path.expanduser("~/Library/Application Support/CrossOver/Bottles/MT5/drive_c/Program Files/MetaTrader 5/MQL5/Files/nas100_live.csv"))
 LIVE_GOLD_PATH = Path(os.path.expanduser("~/Library/Application Support/CrossOver/Bottles/MT5/drive_c/Program Files/MetaTrader 5/MQL5/Files/xauusd_live.csv"))
+
+LIVE_NAS100_PATH_1M = Path(os.path.expanduser("~/Library/Application Support/CrossOver/Bottles/MT5/drive_c/Program Files/MetaTrader 5/MQL5/Files/nas100_live_1m.csv"))
+LIVE_GOLD_PATH_1M = Path(os.path.expanduser("~/Library/Application Support/CrossOver/Bottles/MT5/drive_c/Program Files/MetaTrader 5/MQL5/Files/xauusd_live_1m.csv"))
 
 PROB_HIGH = 0.70
 PROB_LOW  = 0.30
@@ -467,6 +479,235 @@ def generate_briefing():
     print("\n3. ORB STRATEGY IMPACT")
     print(f"   {orb_advice}")
     print("="*65 + "\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. SPEED OF TAPE MODEL (1M→15M, predicts 4H tape regime)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_tape_features_live(df_1m: pd.DataFrame) -> pd.DataFrame:
+    """Compute tape speed features from 1M live data (no labels)."""
+    from tape_speed_features import compute_bar_activity, aggregate_to_15m, add_rolling_context, add_session_features
+
+    df_active = compute_bar_activity(df_1m)
+    df_15m = aggregate_to_15m(df_active)
+    df_15m = add_rolling_context(df_15m)
+    df_15m = add_session_features(df_15m)
+    return df_15m
+
+
+def train_speed_of_tape_model(asset: str = "NAS100"):
+    """Train Speed of Tape LightGBM on all historical 1M data.
+    Returns (model, feature_cols)."""
+    from tape_speed_features import build_tape_dataset
+
+    hist_1m_path = get_historical_1m_path(asset)
+    if asset == "NAS100":
+        from tape_speed_features import load_nq_1m as loader_1m
+    else:
+        from tape_speed_features import load_gold_1m as loader_1m
+
+    df_1m = loader_1m(str(hist_1m_path))
+    joined, feat_cols = build_tape_dataset(df_1m, asset_name=asset, verbose=False)
+
+    X = joined[feat_cols].values.astype(np.float32)
+    y = joined["tape_regime"].values.astype(np.int32)
+
+    model = lgb.LGBMClassifier(
+        n_estimators=300, learning_rate=0.05, num_leaves=31, max_depth=7,
+        subsample=0.8, colsample_bytree=0.7,
+        class_weight="balanced", random_state=42, verbose=-1,
+    )
+    model.fit(X, y)
+
+    return model, feat_cols
+
+
+def compute_speed_of_tape_state(df_live_1m: pd.DataFrame, model, feature_cols: list) -> dict:
+    """Compute the current Speed of Tape state from live 1M data.
+
+    Returns dict with keys:
+        tape_regime_prob   : float — probability of Fast Tape
+        active_ratio       : float — current fraction of price-changing bars
+        active_ratio_ma20  : float — 20-bar trend of active ratio
+        tv_zscore_20       : float — tick volume z-score vs 20-bar baseline
+        regime_label       : str   — "FAST_TAPE" / "SLOW_TAPE" / "UNCERTAIN"
+        regime_color       : str   — Rich color string
+    """
+    if len(df_live_1m) < 500:
+        return {
+            'tape_regime_prob': np.nan, 'active_ratio': np.nan,
+            'active_ratio_ma20': np.nan, 'tv_zscore_20': np.nan,
+            'regime_label': 'INSUFFICIENT DATA', 'regime_color': 'dim'
+        }
+
+    df_15m = _compute_tape_features_live(df_live_1m)
+
+    if len(df_15m) < 20:
+        return {
+            'tape_regime_prob': np.nan, 'active_ratio': np.nan,
+            'active_ratio_ma20': np.nan, 'tv_zscore_20': np.nan,
+            'regime_label': 'WARMING UP', 'regime_color': 'dim'
+        }
+
+    latest = df_15m.iloc[[-1]]
+
+    missing = [c for c in feature_cols if c not in latest.columns]
+    for c in missing:
+        latest[c] = np.nan
+
+    X = latest[feature_cols].values
+
+    if np.any(np.isnan(X)):
+        ar = float(latest['active_ratio'].values[0]) if 'active_ratio' in latest.columns else np.nan
+        ar_ma = float(latest['active_ratio_ma20'].values[0]) if 'active_ratio_ma20' in latest.columns else np.nan
+        tvz = float(latest['tv_zscore_20'].values[0]) if 'tv_zscore_20' in latest.columns else np.nan
+        return {
+            'tape_regime_prob': np.nan, 'active_ratio': ar,
+            'active_ratio_ma20': ar_ma, 'tv_zscore_20': tvz,
+            'regime_label': 'COMPUTING...', 'regime_color': 'dim'
+        }
+
+    prob = float(model.predict_proba(X)[:, 1][0])
+
+    ar = float(latest['active_ratio'].values[0]) if 'active_ratio' in latest.columns else np.nan
+    ar_ma = float(latest['active_ratio_ma20'].values[0]) if 'active_ratio_ma20' in latest.columns else np.nan
+    tvz = float(latest['tv_zscore_20'].values[0]) if 'tv_zscore_20' in latest.columns else np.nan
+
+    if prob > 0.70:
+        label = "FAST TAPE"
+        color = "bright_green"
+    elif prob < 0.30:
+        label = "SLOW TAPE"
+        color = "bright_red"
+    else:
+        label = "UNCERTAIN"
+        color = "bright_yellow"
+
+    return {
+        'tape_regime_prob': prob,
+        'active_ratio': ar,
+        'active_ratio_ma20': ar_ma,
+        'tv_zscore_20': tvz,
+        'regime_label': label,
+        'regime_color': color,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. MICRO-REGIME MODEL (1M, predicts 15-min tape regime)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_micro_features_live(df_1m: pd.DataFrame) -> pd.DataFrame:
+    """Compute micro-regime features from 1M live data (no labels)."""
+    from micro_regime_features import compute_instant_features, compute_rolling_features, compute_lag_features, add_session_features
+
+    df = compute_instant_features(df_1m)
+    df["active_ratio"] = df["is_active"]
+    df = compute_rolling_features(df)
+    df = compute_lag_features(df)
+    df = add_session_features(df)
+    return df
+
+
+def train_micro_regime_model(asset: str = "NAS100"):
+    """Train Micro-Regime LightGBM on all historical 1M data.
+    Returns (model, feature_cols)."""
+    from micro_regime_features import build_micro_dataset
+
+    hist_1m_path = get_historical_1m_path(asset)
+    if asset == "NAS100":
+        from tape_speed_features import load_nq_1m as loader_1m
+    else:
+        from tape_speed_features import load_gold_1m as loader_1m
+
+    df_1m = loader_1m(str(hist_1m_path))
+    subsample = 0.5 if asset == "GOLD" else 1.0
+    joined, feat_cols = build_micro_dataset(df_1m, asset_name=asset,
+                                            subsample_frac=subsample, verbose=False)
+
+    X = joined[feat_cols].values.astype(np.float32)
+    y = joined["micro_regime"].values.astype(np.int32)
+
+    model = lgb.LGBMClassifier(
+        n_estimators=300, learning_rate=0.05, num_leaves=31, max_depth=7,
+        subsample=0.8, colsample_bytree=0.7,
+        class_weight="balanced", random_state=42, verbose=-1,
+    )
+    model.fit(X, y)
+
+    return model, feat_cols
+
+
+def compute_micro_regime_state(df_live_1m: pd.DataFrame, model, feature_cols: list) -> dict:
+    """Compute the current Micro-Regime state from live 1M data.
+
+    Returns dict with keys:
+        micro_regime_prob   : float — probability of Fast Tape next 15 min
+        active_ratio_15     : float — current 15-bar active ratio
+        tv_momentum         : float — tick volume momentum
+        silent_ratio_15     : float — fraction of silent bars
+        regime_label        : str   — "FAST" / "SLOW" / "UNCERTAIN"
+        regime_color        : str   — Rich color string
+    """
+    if len(df_live_1m) < 100:
+        return {
+            'micro_regime_prob': np.nan, 'active_ratio_15': np.nan,
+            'tv_momentum': np.nan, 'silent_ratio_15': np.nan,
+            'regime_label': 'INSUFFICIENT DATA', 'regime_color': 'dim'
+        }
+
+    df_feat = _compute_micro_features_live(df_live_1m)
+
+    if len(df_feat) < 60:
+        return {
+            'micro_regime_prob': np.nan, 'active_ratio_15': np.nan,
+            'tv_momentum': np.nan, 'silent_ratio_15': np.nan,
+            'regime_label': 'WARMING UP', 'regime_color': 'dim'
+        }
+
+    latest = df_feat.iloc[[-1]]
+
+    missing = [c for c in feature_cols if c not in latest.columns]
+    for c in missing:
+        latest[c] = np.nan
+
+    X = latest[feature_cols].values
+
+    if np.any(np.isnan(X)):
+        ar15 = float(latest['active_ratio_15'].values[0]) if 'active_ratio_15' in latest.columns else np.nan
+        tvm = float(latest['tv_momentum'].values[0]) if 'tv_momentum' in latest.columns else np.nan
+        sr15 = float(latest['silent_ratio_15'].values[0]) if 'silent_ratio_15' in latest.columns else np.nan
+        return {
+            'micro_regime_prob': np.nan, 'active_ratio_15': ar15,
+            'tv_momentum': tvm, 'silent_ratio_15': sr15,
+            'regime_label': 'COMPUTING...', 'regime_color': 'dim'
+        }
+
+    prob = float(model.predict_proba(X)[:, 1][0])
+
+    ar15 = float(latest['active_ratio_15'].values[0]) if 'active_ratio_15' in latest.columns else np.nan
+    tvm = float(latest['tv_momentum'].values[0]) if 'tv_momentum' in latest.columns else np.nan
+    sr15 = float(latest['silent_ratio_15'].values[0]) if 'silent_ratio_15' in latest.columns else np.nan
+
+    if prob > 0.70:
+        label = "FAST"
+        color = "bright_green"
+    elif prob < 0.30:
+        label = "SLOW"
+        color = "bright_red"
+    else:
+        label = "UNCERTAIN"
+        color = "bright_yellow"
+
+    return {
+        'micro_regime_prob': prob,
+        'active_ratio_15': ar15,
+        'tv_momentum': tvm,
+        'silent_ratio_15': sr15,
+        'regime_label': label,
+        'regime_color': color,
+    }
+
 
 if __name__ == "__main__":
     generate_briefing()
