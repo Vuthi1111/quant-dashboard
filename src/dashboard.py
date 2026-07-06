@@ -412,7 +412,7 @@ class DashboardApp(App):
 
     Log#boot_log {
         height: 12;
-        border: solid bright_green;
+        border: solid #55ff55;
         background: #0a0a0a;
         color: #55ff55;
         margin: 0 0 1 0;
@@ -504,21 +504,22 @@ class DashboardApp(App):
         boot_log = self.query_one("#boot_log", Log)
         boot_start = time_module.time()
 
-        def boot_msg(msg: str):
+        async def boot_msg(msg: str):
             elapsed = time_module.time() - boot_start
             boot_log.write_line(f"[{elapsed:6.1f}s]  {msg}")
+            await asyncio.sleep(0.05)
 
-        boot_msg("Dashboard v4.0 initialised — 5 inference cores.")
-        boot_msg("Fetching ForexFactory macro calendar…")
-        self.news_events = get_forexfactory_calendar()
-        boot_msg(f"Calendar loaded — {len(self.news_events)} high-impact USD event(s) today.")
+        await boot_msg("Dashboard v4.0 initialised — 5 inference cores.")
+        await boot_msg("Fetching ForexFactory macro calendar…")
+        self.news_events = await asyncio.to_thread(get_forexfactory_calendar)
+        await boot_msg(f"Calendar loaded — {len(self.news_events)} high-impact USD event(s) today.")
 
-        boot_msg("Initializing Discretionary Decision Log DB…")
+        await boot_msg("Initializing Discretionary Decision Log DB…")
         await asyncio.to_thread(init_db)
 
-        boot_msg("=" * 40)
-        boot_msg("PHASE 1/5 — Vol Regime 1H & 4H")
-        boot_msg("=" * 40)
+        await boot_msg("=" * 40)
+        await boot_msg("PHASE 1/5 — Vol Regime 1H & 4H")
+        await boot_msg("=" * 40)
         for asset in ["NAS100", "GOLD"]:
             try:
                 if asset == "NAS100":
@@ -526,7 +527,7 @@ class DashboardApp(App):
                 else:
                     hist_path = "/Users/macos/Documents/ALGO/03_Data/raw/GOLD_XAUUSD/XAUUSD_1H.csv"
 
-                boot_msg(f"Loading & training {asset} Vol Regime…")
+                await boot_msg(f"Loading & training {asset} Vol Regime…")
                 df_hist = await asyncio.to_thread(load_mt5_csv, hist_path)
                 df_daily = df_hist.resample('D').agg({'High': 'max', 'Low': 'min'}).dropna()
                 adr_20 = (df_daily['High'] - df_daily['Low']).rolling(20).mean().iloc[-1]
@@ -534,51 +535,51 @@ class DashboardApp(App):
 
                 models_dict = await asyncio.to_thread(train_production_model, asset)
                 self.models[asset] = models_dict
-                boot_msg(f"✅ Vol Regime models (1H & 4H) for {asset} compiled.")
+                await boot_msg(f"✅ Vol Regime models (1H & 4H) for {asset} compiled.")
             except Exception as e:
-                boot_msg(f"❌ {asset} Vol Regime training failed: {e}")
+                await boot_msg(f"❌ {asset} Vol Regime training failed: {e}")
                 self.notify(f"⚠  {asset} Vol Regime error: {e}", severity="error", timeout=10)
 
-        boot_msg("=" * 40)
-        boot_msg("PHASE 2/5 — Speed of Tape (1H→4H)")
-        boot_msg("=" * 40)
+        await boot_msg("=" * 40)
+        await boot_msg("PHASE 2/5 — Speed of Tape (1H→4H)")
+        await boot_msg("=" * 40)
         for asset in ["NAS100", "GOLD"]:
             try:
-                boot_msg(f"Training Speed of Tape ({asset}) on 1M history…")
+                await boot_msg(f"Training Speed of Tape ({asset}) on 1M history…")
                 tape_model, tape_feat = await asyncio.to_thread(train_speed_of_tape_model, asset)
                 self.speed_tape_models[asset] = (tape_model, tape_feat)
-                boot_msg(f"✅ Speed of Tape model for {asset} compiled.")
+                await boot_msg(f"✅ Speed of Tape model for {asset} compiled.")
             except Exception as e:
-                boot_msg(f"❌ {asset} Speed of Tape training failed: {e}")
+                await boot_msg(f"❌ {asset} Speed of Tape training failed: {e}")
 
-        boot_msg("=" * 40)
-        boot_msg("PHASE 3/5 — Micro-Regime (1M→15M)")
-        boot_msg("=" * 40)
+        await boot_msg("=" * 40)
+        await boot_msg("PHASE 3/5 — Micro-Regime (1M→15M)")
+        await boot_msg("=" * 40)
         for asset in ["NAS100", "GOLD"]:
             try:
-                boot_msg(f"Training Micro-Regime ({asset}) on 1M history…")
+                await boot_msg(f"Training Micro-Regime ({asset}) on 1M history…")
                 micro_model, micro_feat = await asyncio.to_thread(train_micro_regime_model, asset)
                 self.micro_regime_models[asset] = (micro_model, micro_feat)
-                boot_msg(f"✅ Micro-Regime model for {asset} compiled.")
+                await boot_msg(f"✅ Micro-Regime model for {asset} compiled.")
             except Exception as e:
-                boot_msg(f"❌ {asset} Micro-Regime training failed: {e}")
+                await boot_msg(f"❌ {asset} Micro-Regime training failed: {e}")
 
-        boot_msg("=" * 40)
-        boot_msg("PHASE 4/5 — VWAP Copilot (GOLD 15M)")
-        boot_msg("=" * 40)
+        await boot_msg("=" * 40)
+        await boot_msg("PHASE 4/5 — VWAP Copilot (GOLD 15M)")
+        await boot_msg("=" * 40)
         try:
-            boot_msg("Training 15M VWAP Copilot model on historical Gold data…")
+            await boot_msg("Training 15M VWAP Copilot model on historical Gold data…")
             self.vwap_copilot = await asyncio.to_thread(train_vwap_copilot_model)
-            boot_msg("✅ VWAP Copilot compiled.")
+            await boot_msg("✅ VWAP Copilot compiled.")
         except Exception as e:
-            boot_msg(f"❌ VWAP Copilot training failed: {e}")
+            await boot_msg(f"❌ VWAP Copilot training failed: {e}")
 
-        boot_msg("=" * 40)
-        boot_msg("PHASE 5/5 — Starting live loop")
-        boot_msg("=" * 40)
+        await boot_msg("=" * 40)
+        await boot_msg("PHASE 5/5 — Starting live loop")
+        await boot_msg("=" * 40)
         self.notify("✅  System Ready — All 5 cores active.", timeout=4)
         elapsed = time_module.time() - boot_start
-        boot_msg(f"Boot complete — {elapsed:.1f}s total. Entering live loop.")
+        await boot_msg(f"Boot complete — {elapsed:.1f}s total. Entering live loop.")
         self.set_interval(1.0, self.update_dashboard)
         self.query_one("#boot_log").remove()
 
